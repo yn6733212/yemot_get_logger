@@ -1,1 +1,7 @@
 Flask
+requests
+yfinance
+pandas
+SpeechRecognition
+pydub
+numpy
