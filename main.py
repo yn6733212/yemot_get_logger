@@ -2,15 +2,12 @@
 # -*- coding: utf-8 -*-
 import requests
 import os
-import io
 import tempfile
 import datetime
-import pandas as pd
 import yfinance as yf
 from flask import Flask, request, jsonify
 from pydub import AudioSegment
 import speech_recognition as sr
-import subprocess
 import logging
 import warnings
 
@@ -19,7 +16,6 @@ USERNAME = "0733181201"
 PASSWORD = "6714453"
 TOKEN = f"{USERNAME}:{PASSWORD}"
 YEMOT_DOWNLOAD_URL = "https://www.call2all.co.il/ym/api/DownloadFile"
-FFMPEG_EXECUTABLE = "ffmpeg"
 
 app = Flask(__name__)
 
@@ -32,14 +28,14 @@ warnings.filterwarnings("ignore")
 # =====================================================
 
 def add_silence(input_path: str) -> AudioSegment:
-    """הוספת שנייה שקט בתחילת וסוף הקובץ (מייצב את הזיהוי)"""
+    """הוספת שנייה שקט בתחילת וסוף הקובץ"""
     audio = AudioSegment.from_file(input_path, format="wav")
     silence = AudioSegment.silent(duration=1000)
     return silence + audio + silence
 
 
 def recognize_speech(audio_segment: AudioSegment) -> str:
-    """זיהוי דיבור בעברית באמצעות Google Speech Recognition"""
+    """זיהוי דיבור בעברית"""
     recognizer = sr.Recognizer()
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
@@ -68,24 +64,18 @@ def transcribe_audio(filename: str) -> str:
 
 
 # =====================================================
-# === פונקציית עזר חדשה להמרת ערכים ל-float ==========
+# === פונקציית עזר להמרת ערכים ל-float ===============
 # =====================================================
 
 def _as_float(x):
-    """המרת כל סוג נתון אפשרי (Series, numpy.float64 וכו') ל-float רגיל"""
-    if isinstance(x, (float, int)):
-        return float(x)
-    if hasattr(x, "values"):
-        try:
-            return float(x.values[0])
-        except Exception:
-            pass
-    if hasattr(x, "iloc"):
-        try:
-            return float(x.iloc[0])
-        except Exception:
-            pass
+    """המרת סוגים שונים ל-float"""
     try:
+        if isinstance(x, (float, int)):
+            return float(x)
+        if hasattr(x, "values"):
+            return float(x.values[0])
+        if hasattr(x, "iloc"):
+            return float(x.iloc[0])
         return float(x)
     except Exception:
         return 0.0
@@ -96,12 +86,11 @@ def _as_float(x):
 # =====================================================
 
 def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb_days):
-    """חישוב תשואה מדויקת לפי הפקדות מדורגות (DCA)"""
+    """חישוב תשואה לפי הפקדות מדורגות"""
     try:
         start_date = datetime.datetime.strptime(start_date, "%d-%m-%Y").date()
         end_date = datetime.date.today()
 
-        # הורדת נתונים היסטוריים
         data = yf.download(ticker, start=start_date, end=end_date, progress=False)
         if data.empty:
             return {"error": "לא נמצאו נתוני שוק עבור הנייר"}
@@ -110,37 +99,49 @@ def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb
         total_invested = 0.0
         deposits = []
 
-        current_price = _as_float(data["Close"].iloc[-1])  # ✅ המרה ל-float
+        first_price = _as_float(data["Close"].iloc[0])
+        current_price = _as_float(data["Close"].iloc[-1])
 
-        # הפקדה ראשונית
-        first_price = _as_float(data["Close"].iloc[0])     # ✅ המרה ל-float
+        # הפקדה ראשונה
         total_units += start_amount / first_price
         total_invested += start_amount
         deposits.append((start_date, start_amount, first_price))
 
-        # הפקדות חוזרות
-        next_date = start_date + datetime.timedelta(days=throb_days)
-        while next_date <= end_date:
-            closest_date = min(data.index, key=lambda d: abs(d.date() - next_date))
-            price = _as_float(data.loc[closest_date]["Close"])  # ✅ המרה ל-float
-            total_units += monthly_amount / price
-            total_invested += monthly_amount
-            deposits.append((next_date, monthly_amount, price))
-            next_date += datetime.timedelta(days=throb_days)
+        # הפקדות חוזרות (אם יש)
+        if monthly_amount > 0:
+            next_date = start_date + datetime.timedelta(days=throb_days)
+            while next_date <= end_date:
+                closest_date = min(data.index, key=lambda d: abs(d.date() - next_date))
+                price = _as_float(data.loc[closest_date]["Close"])
+                total_units += monthly_amount / price
+                total_invested += monthly_amount
+                deposits.append((next_date, monthly_amount, price))
+                next_date += datetime.timedelta(days=throb_days)
 
         current_value = total_units * current_price
         profit = current_value - total_invested
         percent = (profit / total_invested) * 100 if total_invested > 0 else 0
 
+        # 🧾 --- לוגים בעברית ---
+        logging.info("📊 --- סיכום טרייד ---")
+        logging.info(f"נייר ערך: {ticker}")
+        logging.info(f"מחיר התחלתי בתאריך {start_date.strftime('%d-%m-%Y')}: {first_price:.2f}$")
+        logging.info(f"מחיר נוכחי: {current_price:.2f}$")
+        logging.info(f"סכום כולל שהושקע: {total_invested:.2f}$")
+        logging.info(f"שווי נוכחי כולל: {current_value:.2f}$")
+        logging.info(f"סה״כ רווח: {profit:.2f}$ ({percent:.2f}%)")
+        logging.info("----------------------------")
+
         return {
             "ticker": ticker,
             "start_date": start_date.strftime("%d-%m-%Y"),
             "end_date": end_date.strftime("%d-%m-%Y"),
-            "total_invested": round(_as_float(total_invested), 2),
-            "current_value": round(_as_float(current_value), 2),
-            "profit": round(_as_float(profit), 2),
-            "percent": round(_as_float(percent), 2),
-            "current_price": round(_as_float(current_price), 2),
+            "first_price": round(first_price, 2),
+            "current_price": round(current_price, 2),
+            "total_invested": round(total_invested, 2),
+            "current_value": round(current_value, 2),
+            "profit": round(profit, 2),
+            "percent": round(percent, 2),
             "deposits_count": len(deposits)
         }
 
@@ -157,7 +158,6 @@ def process_investment():
     logging.info("\n" + "=" * 60)
     logging.info(f"📞 בקשה התקבלה ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
 
-    # --- שליפת פרמטרים ---
     stock_name = request.args.get("stock_name")
     start_date = request.args.get("Starting_date") or request.args.get("Startig_date")
     start_amount = float(request.args.get("Starting_amount", 0))
@@ -167,7 +167,6 @@ def process_investment():
     if not stock_name or not start_date or not start_amount:
         return jsonify({"error": "חסרים פרמטרים נדרשים"}), 400
 
-    # --- הורדת הקלטה מימות ---
     logging.info(f"⬇️ מוריד הקלטה מימות: {stock_name}")
     path_on_yemot = f"ivr2:/{stock_name.lstrip('/')}"
     params = {"token": TOKEN, "path": path_on_yemot}
@@ -178,14 +177,12 @@ def process_investment():
     temp_wav.write(response.content)
     temp_wav.close()
 
-    # --- זיהוי דיבור ---
     recognized_text = transcribe_audio(temp_wav.name)
     os.remove(temp_wav.name)
 
     if not recognized_text:
         return jsonify({"error": "לא זוהה דיבור ברור"})
 
-    # === כאן נשתמש בעתיד בקובץ CSV ===
     mapping = {
         "ביטקוין": "BTC-USD",
         "טסלה": "TSLA",
@@ -202,9 +199,8 @@ def process_investment():
     if not ticker:
         return jsonify({"error": f"לא נמצא טיקר תואם למילה '{recognized_text}'"})
 
-    # --- חישוב תשואה ---
     result = calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb)
-    logging.info(f"✅ תוצאה: {result}")
+    logging.info(f"✅ תוצאה JSON: {result}")
     logging.info("=" * 60 + "\n")
 
     return jsonify(result)
