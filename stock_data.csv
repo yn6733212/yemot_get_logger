@@ -1,0 +1,11 @@
+name,symbol,display_name,type,has_dedicated_folder,target_path
+טסלה,TSLA,טֶסְלָה,stock,false,
+ביטקוין,BTC-USD,בִּיטְקוֹין,crypto,false,
+אס אנד פי,SPY,S&P 500,index,false,
+תל אביב 35,TA35.TA,תֵּל אָבִיב שְׁלוֹשִים וְחָמֵש,index,false,
+מיקרוסופט,MSFT,מַייקרוֹסוֹפט,stock,false,
+נפט גולמי,CL=F,נֶפְט,commodity,false,
+זהב,GC=F,זָהָב,commodity,false,
+אתריום,ETH-USD,אֶתְ'רִיוּם,crypto,false,
+נאסד״ק 100,QQQ,NASDAQ 100,index,false,
+דאו ג'ונס,DIA,דאו ג׳ונס,index,false
