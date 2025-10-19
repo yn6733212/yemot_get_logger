@@ -27,7 +27,6 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 warnings.filterwarnings("ignore")
 
-
 # =====================================================
 # === פונקציות זיהוי דיבור ============================
 # =====================================================
@@ -69,6 +68,30 @@ def transcribe_audio(filename: str) -> str:
 
 
 # =====================================================
+# === פונקציית עזר חדשה להמרת ערכים ל-float ==========
+# =====================================================
+
+def _as_float(x):
+    """המרת כל סוג נתון אפשרי (Series, numpy.float64 וכו') ל-float רגיל"""
+    if isinstance(x, (float, int)):
+        return float(x)
+    if hasattr(x, "values"):
+        try:
+            return float(x.values[0])
+        except Exception:
+            pass
+    if hasattr(x, "iloc"):
+        try:
+            return float(x.iloc[0])
+        except Exception:
+            pass
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
+
+
+# =====================================================
 # === פונקציית חישוב תשואה מדויקת ====================
 # =====================================================
 
@@ -87,10 +110,10 @@ def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb
         total_invested = 0.0
         deposits = []
 
-        current_price = data["Close"].iloc[-1]
+        current_price = _as_float(data["Close"].iloc[-1])  # ✅ המרה ל-float
 
         # הפקדה ראשונית
-        first_price = data["Close"].iloc[0]
+        first_price = _as_float(data["Close"].iloc[0])     # ✅ המרה ל-float
         total_units += start_amount / first_price
         total_invested += start_amount
         deposits.append((start_date, start_amount, first_price))
@@ -99,7 +122,7 @@ def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb
         next_date = start_date + datetime.timedelta(days=throb_days)
         while next_date <= end_date:
             closest_date = min(data.index, key=lambda d: abs(d.date() - next_date))
-            price = data.loc[closest_date]["Close"]
+            price = _as_float(data.loc[closest_date]["Close"])  # ✅ המרה ל-float
             total_units += monthly_amount / price
             total_invested += monthly_amount
             deposits.append((next_date, monthly_amount, price))
@@ -107,17 +130,17 @@ def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb
 
         current_value = total_units * current_price
         profit = current_value - total_invested
-        percent = (profit / total_invested) * 100
+        percent = (profit / total_invested) * 100 if total_invested > 0 else 0
 
         return {
             "ticker": ticker,
             "start_date": start_date.strftime("%d-%m-%Y"),
             "end_date": end_date.strftime("%d-%m-%Y"),
-            "total_invested": round(total_invested, 2),
-            "current_value": round(current_value, 2),
-            "profit": round(profit, 2),
-            "percent": round(percent, 2),
-            "current_price": round(current_price, 2),
+            "total_invested": round(_as_float(total_invested), 2),
+            "current_value": round(_as_float(current_value), 2),
+            "profit": round(_as_float(profit), 2),
+            "percent": round(_as_float(percent), 2),
+            "current_price": round(_as_float(current_price), 2),
             "deposits_count": len(deposits)
         }
 
@@ -163,7 +186,6 @@ def process_investment():
         return jsonify({"error": "לא זוהה דיבור ברור"})
 
     # === כאן נשתמש בעתיד בקובץ CSV ===
-    # כרגע ניקח דוגמה קטנה זמנית:
     mapping = {
         "ביטקוין": "BTC-USD",
         "טסלה": "TSLA",
