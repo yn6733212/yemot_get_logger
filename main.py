@@ -17,8 +17,8 @@ import yfinance as yf
 from flask import Flask, request, jsonify
 from pydub import AudioSegment
 import speech_recognition as sr
-import edge_tts  # pip install edge-tts
-import nest_asyncio # 🛠️ התיקון: ייבוא הספרייה
+import edge_tts
+import nest_asyncio
 
 # 🛠️ התיקון: הפעלת nest_asyncio כדי לאפשר ל-asyncio.run לרוץ בתוך סביבת Flask/Gunicorn
 try:
