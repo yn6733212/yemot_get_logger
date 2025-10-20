@@ -10,12 +10,19 @@ from pydub import AudioSegment
 import speech_recognition as sr
 import logging
 import warnings
+import pandas as pd
 
 # --- הגדרות בסיס ---
 USERNAME = "0733181201"
 PASSWORD = "6714453"
 TOKEN = f"{USERNAME}:{PASSWORD}"
 YEMOT_DOWNLOAD_URL = "https://www.call2all.co.il/ym/api/DownloadFile"
+
+# --- טעינת מפת שמות מניות ---
+CSV_PATH = "stock_data.csv"
+if not os.path.exists(CSV_PATH):
+    raise FileNotFoundError(f"❌ לא נמצא הקובץ {CSV_PATH}")
+stock_df = pd.read_csv(CSV_PATH)
 
 app = Flask(__name__)
 
@@ -44,7 +51,7 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
                 data = recognizer.record(source)
             text = recognizer.recognize_google(data, language="he-IL")
             logging.info(f"✅ זוהה דיבור: {text}")
-            return text
+            return text.strip()
     except sr.UnknownValueError:
         logging.info("❌ לא זוהה דיבור ברור.")
         return ""
@@ -54,7 +61,7 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
 
 
 def transcribe_audio(filename: str) -> str:
-    """עטיפת התהליך"""
+    """עטיפת תהליך זיהוי"""
     try:
         processed_audio = add_silence(filename)
         return recognize_speech(processed_audio)
@@ -64,7 +71,7 @@ def transcribe_audio(filename: str) -> str:
 
 
 # =====================================================
-# === פונקציית עזר להמרת ערכים ל-float ===============
+# === פונקציות עזר לחישוב תשואה =======================
 # =====================================================
 
 def _as_float(x):
@@ -80,10 +87,6 @@ def _as_float(x):
     except Exception:
         return 0.0
 
-
-# =====================================================
-# === פונקציית חישוב תשואה מדויקת ====================
-# =====================================================
 
 def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb_days):
     """חישוב תשואה לפי הפקדות מדורגות"""
@@ -107,7 +110,7 @@ def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb
         total_invested += start_amount
         deposits.append((start_date, start_amount, first_price))
 
-        # הפקדות חוזרות (אם יש)
+        # הפקדות חודשיות
         if monthly_amount > 0:
             next_date = start_date + datetime.timedelta(days=throb_days)
             while next_date <= end_date:
@@ -122,14 +125,11 @@ def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb
         profit = current_value - total_invested
         percent = (profit / total_invested) * 100 if total_invested > 0 else 0
 
-        # 🧾 --- לוגים בעברית ---
         logging.info("📊 --- סיכום טרייד ---")
         logging.info(f"נייר ערך: {ticker}")
-        logging.info(f"מחיר התחלתי בתאריך {start_date.strftime('%d-%m-%Y')}: {first_price:.2f}$")
-        logging.info(f"מחיר נוכחי: {current_price:.2f}$")
-        logging.info(f"סכום כולל שהושקע: {total_invested:.2f}$")
-        logging.info(f"שווי נוכחי כולל: {current_value:.2f}$")
-        logging.info(f"סה״כ רווח: {profit:.2f}$ ({percent:.2f}%)")
+        logging.info(f"מחיר התחלתי: {first_price:.2f}$ | נוכחי: {current_price:.2f}$")
+        logging.info(f"השקעה כוללת: {total_invested:.2f}$ | שווי נוכחי: {current_value:.2f}$")
+        logging.info(f"רווח: {profit:.2f}$ ({percent:.2f}%)")
         logging.info("----------------------------")
 
         return {
@@ -150,6 +150,19 @@ def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb
 
 
 # =====================================================
+# === חיפוש דינמי בקובץ CSV ==========================
+# =====================================================
+
+def find_ticker(recognized_text: str) -> str:
+    """חיפוש סימבול לפי טקסט מזוהה (בעברית או באנגלית)"""
+    recognized_text = recognized_text.strip().lower()
+    for _, row in stock_df.iterrows():
+        if row["name"].lower() in recognized_text or row["display_name"].lower() in recognized_text:
+            return row["symbol"]
+    return None
+
+
+# =====================================================
 # === נקודת קצה ראשית ================================
 # =====================================================
 
@@ -167,37 +180,24 @@ def process_investment():
     if not stock_name or not start_date or not start_amount:
         return jsonify({"error": "חסרים פרמטרים נדרשים"}), 400
 
-    logging.info(f"⬇️ מוריד הקלטה מימות: {stock_name}")
     path_on_yemot = f"ivr2:/{stock_name.lstrip('/')}"
     params = {"token": TOKEN, "path": path_on_yemot}
     response = requests.get(YEMOT_DOWNLOAD_URL, params=params, timeout=30)
     response.raise_for_status()
 
-    temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    temp_wav.write(response.content)
-    temp_wav.close()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_wav:
+        temp_wav.write(response.content)
+        temp_wav_path = temp_wav.name
 
-    recognized_text = transcribe_audio(temp_wav.name)
-    os.remove(temp_wav.name)
+    recognized_text = transcribe_audio(temp_wav_path)
+    os.remove(temp_wav_path)
 
     if not recognized_text:
         return jsonify({"error": "לא זוהה דיבור ברור"})
 
-    mapping = {
-        "ביטקוין": "BTC-USD",
-        "טסלה": "TSLA",
-        "אס אנד פי": "SPY",
-        "תל אביב": "TA35.TA"
-    }
-
-    ticker = None
-    for key, value in mapping.items():
-        if key in recognized_text:
-            ticker = value
-            break
-
+    ticker = find_ticker(recognized_text)
     if not ticker:
-        return jsonify({"error": f"לא נמצא טיקר תואם למילה '{recognized_text}'"})
+        return jsonify({"error": f"לא נמצא נייר ערך מתאים לטקסט '{recognized_text}'"})
 
     result = calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb)
     logging.info(f"✅ תוצאה JSON: {result}")
