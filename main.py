@@ -18,6 +18,7 @@ from flask import Flask, request, jsonify
 from pydub import AudioSegment
 import speech_recognition as sr
 import edge_tts  # pip install edge-tts
+import nest_asyncio  # ✅ תיקון - מאפשר להריץ asyncio בתוך Flask
 
 # === הגדרות בסיס ===
 USERNAME = "0733181201"
@@ -286,8 +287,10 @@ def make_and_upload_tts(text: str, api_phone: str):
     with tempfile.TemporaryDirectory() as td:
         mp3_path = os.path.join(td, "tts.mp3")
         wav_path = os.path.join(td, "tts.wav")
-        # סינתזה
-        asyncio.run(_edge_tts_synthesize(text, mp3_path))
+        # ✅ תיקון: הפעלת edge-tts גם כש-Flask כבר מריץ event loop
+        nest_asyncio.apply()
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(_edge_tts_synthesize(text, mp3_path))
         # המרה
         mp3_to_wav_pcm8k_mono(mp3_path, wav_path)
         # העלאה
