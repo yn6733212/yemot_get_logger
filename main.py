@@ -1,55 +1,68 @@
 # filename: main.py
 # -*- coding: utf-8 -*-
-import requests
 import os
+import io
+import asyncio
+import time
 import tempfile
 import datetime
+import logging
+import warnings
+import subprocess
+from time import sleep
+
+import requests
+import pandas as pd
 import yfinance as yf
 from flask import Flask, request, jsonify
 from pydub import AudioSegment
 import speech_recognition as sr
-import logging
-import warnings
-import pandas as pd
+import edge_tts  # pip install edge-tts
 
-# --- הגדרות בסיס ---
+# === הגדרות בסיס ===
 USERNAME = "0733181201"
 PASSWORD = "6714453"
 TOKEN = f"{USERNAME}:{PASSWORD}"
 YEMOT_DOWNLOAD_URL = "https://www.call2all.co.il/ym/api/DownloadFile"
+YEMOT_UPLOAD_URL = "https://www.call2all.co.il/ym/api/UploadFile"
 
-# --- טעינת מפת שמות מניות ---
 CSV_PATH = "stock_data.csv"
-if not os.path.exists(CSV_PATH):
-    raise FileNotFoundError(f"❌ לא נמצא הקובץ {CSV_PATH}")
-stock_df = pd.read_csv(CSV_PATH)
+FFMPEG_BIN = "ffmpeg"  # ודא זמין ב-PATH. אחרת כתוב נתיב מלא
 
+# === Flask + לוגים ===
 app = Flask(__name__)
-
-# --- לוגים נקיים ---
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 warnings.filterwarnings("ignore")
 
+# === טעינת טבלת ניירות ===
+if not os.path.exists(CSV_PATH):
+    raise FileNotFoundError(f"❌ לא נמצא הקובץ {CSV_PATH}")
+# comment="#" ידלג על כותרות/כותרות ביניים
+stock_df = pd.read_csv(CSV_PATH, comment="#", dtype=str).fillna("")
+# נורמליזציה קלה לשימוש
+stock_df["name_norm"] = stock_df["name"].str.strip().str.lower()
+stock_df["display_name_norm"] = stock_df["display_name"].str.strip().str.lower()
+stock_df["symbol"] = stock_df["symbol"].str.strip()
+
 # =====================================================
-# === פונקציות זיהוי דיבור ============================
+# === זיהוי דיבור =====================================
 # =====================================================
 
 def add_silence(input_path: str) -> AudioSegment:
-    """הוספת שנייה שקט בתחילת וסוף הקובץ"""
+    """הוספת שנייה שקט בתחילה ובסוף (עוזר ל-ASR)"""
     audio = AudioSegment.from_file(input_path, format="wav")
     silence = AudioSegment.silent(duration=1000)
     return silence + audio + silence
 
-
 def recognize_speech(audio_segment: AudioSegment) -> str:
     """זיהוי דיבור בעברית"""
-    recognizer = sr.Recognizer()
+    rec = sr.Recognizer()
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
-            audio_segment.export(temp_wav.name, format="wav")
-            with sr.AudioFile(temp_wav.name) as source:
-                data = recognizer.record(source)
-            text = recognizer.recognize_google(data, language="he-IL")
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+            audio_segment.export(tmp.name, format="wav")
+            with sr.AudioFile(tmp.name) as source:
+                data = rec.record(source)
+            text = rec.recognize_google(data, language="he-IL")
             logging.info(f"✅ זוהה דיבור: {text}")
             return text.strip()
     except sr.UnknownValueError:
@@ -59,23 +72,20 @@ def recognize_speech(audio_segment: AudioSegment) -> str:
         logging.info(f"❌ שגיאה בזיהוי: {e}")
         return ""
 
-
 def transcribe_audio(filename: str) -> str:
-    """עטיפת תהליך זיהוי"""
     try:
-        processed_audio = add_silence(filename)
-        return recognize_speech(processed_audio)
+        processed = add_silence(filename)
+        return recognize_speech(processed)
     except Exception as e:
         logging.info(f"❌ שגיאה בתמלול: {e}")
         return ""
 
-
 # =====================================================
-# === פונקציות עזר לחישוב תשואה =======================
+# === עזרי שוק ========================================
 # =====================================================
 
 def _as_float(x):
-    """המרת סוגים שונים ל-float"""
+    """המרה זהירה ל-float"""
     try:
         if isinstance(x, (float, int)):
             return float(x)
@@ -87,15 +97,35 @@ def _as_float(x):
     except Exception:
         return 0.0
 
+def _yf_download_with_retries(ticker, start, end, max_retries=3, wait_sec=5):
+    """ריטריים חכמים ל-yfinance לרבות RateLimit"""
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            data = yf.download(ticker, start=start, end=end, progress=False)
+            # yfinance לפעמים לא זורק חריגה, רק מחזיר empty
+            if data is not None and not data.empty:
+                return data
+            # אם ריק – נזרוק חריגה כדי להיכנס למנגנון הריטריים
+            raise RuntimeError("EmptyDataFromYahoo")
+        except Exception as e:
+            last_exc = e
+            msg = str(e)
+            logging.info(f"⚠️ נסיון {attempt}/{max_retries} נכשל: {msg}")
+            if attempt < max_retries:
+                sleep(wait_sec)
+    # נכשל סופית
+    raise last_exc if last_exc else RuntimeError("UnknownYFinanceError")
 
-def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb_days):
-    """חישוב תשואה לפי הפקדות מדורגות"""
+def calculate_dca_return(ticker, start_date_str, start_amount, monthly_amount, throb_days):
+    """חישוב תשואה לפי הפקדות מדורגות (DCA) עם ריטריים לנתונים"""
     try:
-        start_date = datetime.datetime.strptime(start_date, "%d-%m-%Y").date()
+        start_date = datetime.datetime.strptime(start_date_str, "%d-%m-%Y").date()
         end_date = datetime.date.today()
 
-        data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        if data.empty:
+        data = _yf_download_with_retries(ticker, start=start_date, end=end_date)
+        # אם עדיין ריק – נחזיר שגיאה
+        if data is None or data.empty:
             return {"error": "לא נמצאו נתוני שוק עבור הנייר"}
 
         total_units = 0.0
@@ -106,17 +136,19 @@ def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb
         current_price = _as_float(data["Close"].iloc[-1])
 
         # הפקדה ראשונה
-        total_units += start_amount / first_price
-        total_invested += start_amount
-        deposits.append((start_date, start_amount, first_price))
+        if start_amount > 0:
+            total_units += start_amount / max(first_price, 1e-9)
+            total_invested += start_amount
+            deposits.append((start_date, start_amount, first_price))
 
-        # הפקדות חודשיות
-        if monthly_amount > 0:
+        # הפקדות מחזוריות
+        if monthly_amount > 0 and throb_days > 0:
             next_date = start_date + datetime.timedelta(days=throb_days)
             while next_date <= end_date:
-                closest_date = min(data.index, key=lambda d: abs(d.date() - next_date))
-                price = _as_float(data.loc[closest_date]["Close"])
-                total_units += monthly_amount / price
+                # מציאת יום מסחר קרוב
+                closest_idx = min(data.index, key=lambda d: abs(d.date() - next_date))
+                price = _as_float(data.loc[closest_idx]["Close"])
+                total_units += monthly_amount / max(price, 1e-9)
                 total_invested += monthly_amount
                 deposits.append((next_date, monthly_amount, price))
                 next_date += datetime.timedelta(days=throb_days)
@@ -142,28 +174,129 @@ def calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb
             "current_value": round(current_value, 2),
             "profit": round(profit, 2),
             "percent": round(percent, 2),
-            "deposits_count": len(deposits)
+            "deposits_count": len(deposits),
         }
-
     except Exception as e:
         return {"error": str(e)}
 
-
 # =====================================================
-# === חיפוש דינמי בקובץ CSV ==========================
+# === חיפוש טיקר וטקסט קולי ==========================
 # =====================================================
 
-def find_ticker(recognized_text: str) -> str:
-    """חיפוש סימבול לפי טקסט מזוהה (בעברית או באנגלית)"""
-    recognized_text = recognized_text.strip().lower()
+def find_ticker(recognized_text: str):
+    """חיפוש סימבול לפי טקסט מזוהה (בעברית/תצוגה/אנגלית)"""
+    if not recognized_text:
+        return None, None
+    txt = recognized_text.strip().lower()
+    # ניסיון התאמה לפי עמודות טקסט
     for _, row in stock_df.iterrows():
-        if row["name"].lower() in recognized_text or row["display_name"].lower() in recognized_text:
-            return row["symbol"]
-    return None
+        name = (row.get("name_norm") or "").strip()
+        dsp = (row.get("display_name_norm") or "").strip()
+        sym = (row.get("symbol") or "").strip()
+        if not sym:
+            continue
+        if name and name in txt:
+            return sym, row.get("display_name") or row.get("name") or sym
+        if dsp and dsp in txt:
+            return sym, row.get("display_name") or row.get("name") or sym
+        # גם אם המשתמש אמר את הסימבול עצמו
+        if sym.lower() in txt:
+            return sym, row.get("display_name") or row.get("name") or sym
+    return None, None
 
+def build_success_tts_text(display_name_he, start_date, start_amount, monthly_amount,
+                           first_price, current_price, total_invested, current_value, profit, percent):
+    """
+    בונה טקסט קולי קריא וברור בעברית, כולל ההסתייגות שבחרת.
+    הערכים נשארים מספריים (לא הופכים למילים) כדי לצאת טבעי בסינתזה.
+    """
+    # עיבוד מינוחי כסף פשוטים (ש"ח/דולר)
+    start_amount_nis = int(round(start_amount))
+    monthly_amount_nis = int(round(monthly_amount))
+    total_invested_nis = int(round(total_invested))
+    current_value_nis = int(round(current_value))
+    profit_nis = int(round(profit))
+
+    text = (
+        f"להלן התוצאה. נייר הערך שבחרת הוא {display_name_he}. "
+        f"התחלת להשקיע בתאריך {start_date.replace('-', ' ')}. "
+        f"עם סכום ראשוני של {start_amount_nis} שקלים. "
+        f"והוספת בכל חודש {monthly_amount_nis} שקלים נוספים. "
+        f"מחיר הנייר ביום ההפקדה עמד על {first_price} דולרים. "
+        f"המחיר כעת עומד על {current_price} דולרים. "
+        f"סך הכול הפקדת {total_invested_nis} שקלים. "
+        f"והשווי הנוכחי של ההשקעה שלך הוא {current_value_nis} שקלים. "
+        f"הרווח הכולל שלך עומד על {profit_nis} שקלים. "
+        f"שהם תשואה של {round(percent, 2)} אחוזים. "
+        "לתשומת לב, הנתונים נשלפו ממקורות עדכניים, אך ייתכנו הבדלים קלים לעומת הנתונים הרשמיים. "
+        "שימוש במידע הוא באחריות המשתמש בלבד."
+    )
+    return text
+
+def build_error_tts_text(err_msg: str):
+    return (
+        f"שגיאה. {err_msg}. "
+        "לתשומת לבך, ייתכנו פערים קלים או עיכוב בעדכון הנתונים. "
+        "אנא נסה שוב מאוחר יותר."
+    )
 
 # =====================================================
-# === נקודת קצה ראשית ================================
+# === Edge TTS + FFmpeg + העלאה ליֶמוֹט ================
+# =====================================================
+
+async def _edge_tts_synthesize(text: str, out_mp3_path: str,
+                               voice: str = "he-IL-AvriNeural", rate: str = "+0%"):
+    """סינתזה ל-MP3 עם Edge TTS"""
+    tts = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+    await tts.save(out_mp3_path)
+
+def mp3_to_wav_pcm8k_mono(in_mp3: str, out_wav: str):
+    """המרה ל-WAV 8kHz מונו PCM (נפוץ ומתאים למערכות IVR)"""
+    cmd = [
+        FFMPEG_BIN, "-y",
+        "-i", in_mp3,
+        "-ac", "1",          # מונו
+        "-ar", "8000",       # 8kHz
+        "-acodec", "pcm_s16le",
+        out_wav
+    ]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if res.returncode != 0:
+        raise RuntimeError(f"FFmpeg failed: {res.stderr.decode(errors='ignore')}")
+
+def upload_to_yemot(local_file_path: str, remote_path_with_filename: str):
+    """
+    העלאת קובץ ל-Yemot:
+    remote_path_with_filename לדוגמה:
+    ivr2:/100/5/Phone/0531234567/result_1699999999.wav
+    """
+    with open(local_file_path, "rb") as f:
+        files = {"file": (os.path.basename(remote_path_with_filename), f, "audio/wav")}
+        data = {"token": TOKEN, "path": remote_path_with_filename}
+        r = requests.post(YEMOT_UPLOAD_URL, data=data, files=files, timeout=60)
+        r.raise_for_status()
+        return r.text
+
+def make_and_upload_tts(text: str, api_phone: str):
+    """יוצר קובץ TTS, ממיר ומעלה ל-Yemot. מחזיר נתיב יעד מלא."""
+    base_dir = f"ivr2:/100/5/Phone/{api_phone.strip()}/"
+    filename = f"result_{int(time.time())}.wav"
+    remote_full_path = base_dir + filename
+
+    with tempfile.TemporaryDirectory() as td:
+        mp3_path = os.path.join(td, "tts.mp3")
+        wav_path = os.path.join(td, "tts.wav")
+        # סינתזה
+        asyncio.run(_edge_tts_synthesize(text, mp3_path))
+        # המרה
+        mp3_to_wav_pcm8k_mono(mp3_path, wav_path)
+        # העלאה
+        upload_to_yemot(wav_path, remote_full_path)
+
+    return remote_full_path
+
+# =====================================================
+# === נקודת קצה ראשית =================================
 # =====================================================
 
 @app.route("/ivr", methods=["GET"])
@@ -171,40 +304,128 @@ def process_investment():
     logging.info("\n" + "=" * 60)
     logging.info(f"📞 בקשה התקבלה ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
 
-    stock_name = request.args.get("stock_name")
+    # פרמטרים מה-API של ימות
+    api_phone = request.args.get("ApiPhone", "").strip()
+    stock_name_path = request.args.get("stock_name")
     start_date = request.args.get("Starting_date") or request.args.get("Startig_date")
     start_amount = float(request.args.get("Starting_amount", 0))
     monthly_amount = float(request.args.get("Monthly_amount", 0))
     throb = int(request.args.get("throb", 30))
 
-    if not stock_name or not start_date or not start_amount:
-        return jsonify({"error": "חסרים פרמטרים נדרשים"}), 400
+    # בדיקות בסיס
+    if not stock_name_path or not start_date or start_amount <= 0:
+        err = "חסרים פרמטרים נדרשים"
+        logging.info(f"❌ {err}")
+        if api_phone:
+            try:
+                t = make_and_upload_tts(build_error_tts_text(err), api_phone)
+                return jsonify({"error": err, "audio": t, "next_ext": "100/5"}), 400
+            except Exception:
+                pass
+        return jsonify({"error": err}), 400
 
-    path_on_yemot = f"ivr2:/{stock_name.lstrip('/')}"
-    params = {"token": TOKEN, "path": path_on_yemot}
-    response = requests.get(YEMOT_DOWNLOAD_URL, params=params, timeout=30)
-    response.raise_for_status()
+    # הורדת ההקלטה מימות
+    try:
+        yemot_path = f"ivr2:/{stock_name_path.lstrip('/')}"
+        params = {"token": TOKEN, "path": yemot_path}
+        r = requests.get(YEMOT_DOWNLOAD_URL, params=params, timeout=30)
+        r.raise_for_status()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(r.content)
+            tmp_path = tmp.name
+    except Exception as e:
+        err = f"שגיאה בהורדת הקלטה: {e}"
+        logging.info(f"❌ {err}")
+        if api_phone:
+            try:
+                t = make_and_upload_tts(build_error_tts_text(err), api_phone)
+                return jsonify({"error": err, "audio": t, "next_ext": "100/5"}), 500
+            except Exception:
+                pass
+        return jsonify({"error": err}), 500
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_wav:
-        temp_wav.write(response.content)
-        temp_wav_path = temp_wav.name
-
-    recognized_text = transcribe_audio(temp_wav_path)
-    os.remove(temp_wav_path)
+    # זיהוי דיבור -> מציאת טיקר
+    try:
+        recognized_text = transcribe_audio(tmp_path)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
     if not recognized_text:
-        return jsonify({"error": "לא זוהה דיבור ברור"})
+        err = "לא זוהה דיבור ברור"
+        logging.info(f"❌ {err}")
+        if api_phone:
+            try:
+                t = make_and_upload_tts(build_error_tts_text(err), api_phone)
+                return jsonify({"error": err, "audio": t, "next_ext": "100/5"}), 200
+            except Exception:
+                pass
+        return jsonify({"error": err}), 200
 
-    ticker = find_ticker(recognized_text)
+    ticker, display_name_he = find_ticker(recognized_text)
     if not ticker:
-        return jsonify({"error": f"לא נמצא נייר ערך מתאים לטקסט '{recognized_text}'"})
+        err = f"לא נמצא נייר ערך מתאים לטקסט '{recognized_text}'"
+        logging.info(f"❌ {err}")
+        if api_phone:
+            try:
+                t = make_and_upload_tts(build_error_tts_text(err), api_phone)
+                return jsonify({"error": err, "audio": t, "next_ext": "100/5"}), 200
+            except Exception:
+                pass
+        return jsonify({"error": err}), 200
 
+    # חישוב תשואה (עם ריטריים פנימי)
     result = calculate_dca_return(ticker, start_date, start_amount, monthly_amount, throb)
-    logging.info(f"✅ תוצאה JSON: {result}")
-    logging.info("=" * 60 + "\n")
 
-    return jsonify(result)
+    # אם שגיאה — נקריא אותה
+    if "error" in result:
+        err = result["error"]
+        logging.info(f"✅ תוצאה JSON: {result}")
+        if api_phone:
+            try:
+                t = make_and_upload_tts(build_error_tts_text(err), api_phone)
+                return jsonify({"error": err, "audio": t, "next_ext": "100/5"}), 200
+            except Exception as e:
+                return jsonify({"error": f"{err}; ושגיאת הקלטה: {e}"}), 200
+        return jsonify(result), 200
+
+    # יצירת טקסט קולי מוצלח
+    tts_text = build_success_tts_text(
+        display_name_he=display_name_he or ticker,
+        start_date=result["start_date"],
+        start_amount=start_amount,
+        monthly_amount=monthly_amount,
+        first_price=result["first_price"],
+        current_price=result["current_price"],
+        total_invested=result["total_invested"],
+        current_value=result["current_value"],
+        profit=result["profit"],
+        percent=result["percent"],
+    )
+
+    audio_remote_path = None
+    if api_phone:
+        try:
+            audio_remote_path = make_and_upload_tts(tts_text, api_phone)
+        except Exception as e:
+            logging.info(f"⚠️ כשל ביצירת/העלאת TTS: {e}")
+
+    # החזרה ללקוח (כולל שלוחה הבאה)
+    out = {
+        "result": result,
+        "recognized_text": recognized_text,
+        "ticker": ticker,
+        "display_name": display_name_he or ticker,
+        "audio": audio_remote_path,   # לדוגמה: ivr2:/100/5/Phone/<ApiPhone>/result_xxx.wav
+        "next_ext": "100/5"           # תוכל להשתמש כדי לבצע ניתוב בשלוחה
+    }
+    logging.info(f"✅ תוצאה JSON: {out}")
+    logging.info("=" * 60 + "\n")
+    return jsonify(out), 200
 
 
 if __name__ == "__main__":
+    # Render וכד' נוהגים להאזין ל-0.0.0.0
     app.run(host="0.0.0.0", port=5000)
