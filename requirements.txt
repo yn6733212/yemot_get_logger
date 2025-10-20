@@ -6,3 +6,4 @@ pydub
 SpeechRecognition
 edge-tts
 ffmpeg
+nest_asyncio
