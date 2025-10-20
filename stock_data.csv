@@ -1,4 +1,4 @@
-display_name,type,has_dedicated_folder,target_path
+name,symbol,display_name,type,has_dedicated_folder,target_path
 טסלה,TSLA,טֶסְלָה,stock,false,
 ביטקוין,BTC-USD,בִּיטְקוֹין,crypto,false,
 אס אנד פי,SPY,S&P 500,index,false,
