@@ -17,14 +17,7 @@ import yfinance as yf
 from flask import Flask, request, jsonify
 from pydub import AudioSegment
 import speech_recognition as sr
-import edge_tts
-import nest_asyncio
-
-# 🛠️ התיקון: הפעלת nest_asyncio כדי לאפשר ל-asyncio.run לרוץ בתוך סביבת Flask/Gunicorn
-try:
-    nest_asyncio.apply()
-except Exception as e:
-    logging.info(f"⚠️ Could not apply nest_asyncio: {e}")
+import edge_tts  # pip install edge-tts
 
 # === הגדרות בסיס ===
 USERNAME = "0733181201"
@@ -34,7 +27,7 @@ YEMOT_DOWNLOAD_URL = "https://www.call2all.co.il/ym/api/DownloadFile"
 YEMOT_UPLOAD_URL = "https://www.call2all.co.il/ym/api/UploadFile"
 
 CSV_PATH = "stock_data.csv"
-FFMPEG_BIN = "ffmpeg" # ודא זמין ב-PATH. אחרת כתוב נתיב מלא
+FFMPEG_BIN = "ffmpeg"  # ודא זמין ב-PATH. אחרת כתוב נתיב מלא
 
 # === Flask + לוגים ===
 app = Flask(__name__)
@@ -212,7 +205,7 @@ def find_ticker(recognized_text: str):
     return None, None
 
 def build_success_tts_text(display_name_he, start_date, start_amount, monthly_amount,
-                            first_price, current_price, total_invested, current_value, profit, percent):
+                           first_price, current_price, total_invested, current_value, profit, percent):
     """
     בונה טקסט קולי קריא וברור בעברית, כולל ההסתייגות שבחרת.
     הערכים נשארים מספריים (לא הופכים למילים) כדי לצאת טבעי בסינתזה.
@@ -252,7 +245,7 @@ def build_error_tts_text(err_msg: str):
 # =====================================================
 
 async def _edge_tts_synthesize(text: str, out_mp3_path: str,
-                                voice: str = "he-IL-AvriNeural", rate: str = "+0%"):
+                               voice: str = "he-IL-AvriNeural", rate: str = "+0%"):
     """סינתזה ל-MP3 עם Edge TTS"""
     tts = edge_tts.Communicate(text=text, voice=voice, rate=rate)
     await tts.save(out_mp3_path)
@@ -262,8 +255,8 @@ def mp3_to_wav_pcm8k_mono(in_mp3: str, out_wav: str):
     cmd = [
         FFMPEG_BIN, "-y",
         "-i", in_mp3,
-        "-ac", "1", # מונו
-        "-ar", "8000", # 8kHz
+        "-ac", "1",          # מונו
+        "-ar", "8000",       # 8kHz
         "-acodec", "pcm_s16le",
         out_wav
     ]
@@ -293,7 +286,7 @@ def make_and_upload_tts(text: str, api_phone: str):
     with tempfile.TemporaryDirectory() as td:
         mp3_path = os.path.join(td, "tts.mp3")
         wav_path = os.path.join(td, "tts.wav")
-        # סינתזה: הפעלת הקורוטינה
+        # סינתזה
         asyncio.run(_edge_tts_synthesize(text, mp3_path))
         # המרה
         mp3_to_wav_pcm8k_mono(mp3_path, wav_path)
@@ -425,8 +418,8 @@ def process_investment():
         "recognized_text": recognized_text,
         "ticker": ticker,
         "display_name": display_name_he or ticker,
-        "audio": audio_remote_path, # לדוגמה: ivr2:/100/5/Phone/<ApiPhone>/result_xxx.wav
-        "next_ext": "100/5" # תוכל להשתמש כדי לבצע ניתוב בשלוחה
+        "audio": audio_remote_path,   # לדוגמה: ivr2:/100/5/Phone/<ApiPhone>/result_xxx.wav
+        "next_ext": "100/5"           # תוכל להשתמש כדי לבצע ניתוב בשלוחה
     }
     logging.info(f"✅ תוצאה JSON: {out}")
     logging.info("=" * 60 + "\n")
@@ -435,4 +428,4 @@ def process_investment():
 
 if __name__ == "__main__":
     # Render וכד' נוהגים להאזין ל-0.0.0.0
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=5000)
